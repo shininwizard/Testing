@@ -1,0 +1,15 @@
+Настройка:
+
+composer require guzzlehttp/guzzle
+composer require symfony/dom-crawler
+composer require symfony/css-selector
+composer require phpmailer/phpmailer
+
+
+
+Что вписать в файл конфигурации testing.ini:
+
+smtp_host = smtp хост для отправки почты
+mail_user = имя пользователя почты
+mail_pass = пароль пользователя почты
+mail_dest = адрес, на который надо отправлять результаты работы
