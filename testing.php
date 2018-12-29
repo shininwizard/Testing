@@ -276,7 +276,7 @@ $client = new Client();
 $parser = new Parser($client);
 
 echo "Getting product urls...";
-$parser->getUrls("https://www.carid.com/suspension-systems.html", 2);
+$parser->getUrls("https://www.carid.com/suspension-systems.html", 5);
 echo "done\n";
 
 echo "Getting product data...";
