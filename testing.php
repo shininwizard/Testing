@@ -353,13 +353,13 @@ if (!file_exists('testing.ini')) {
 	echo "ini file does not exist.\n";
 	exit();
 }
-$ini = parse_ini_file('testing0.ini');
+$ini = parse_ini_file('testing.ini');
 
 $client = new Client();
 $parser = new Parser($client);
 
 echo "Getting product urls...";
-$parser->getUrls("https://www.carid.com/suspension-systems.html", 2);
+$parser->getUrls("https://www.carid.com/suspension-systems.html", 5);
 echo "done\n";
 
 echo "Getting product data...";
