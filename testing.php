@@ -203,54 +203,131 @@ class Parser {
     }
 }
 
-function writeCsv($productData) {
-    if (file_exists('products.csv')) {
-        $productsCsv = fopen('products.csv', 'r');
-        $newCsv = fopen('new_products.csv', 'w');
-        $oldCsv = fopen('disappeared_products.csv', 'w');
-        $reviewsCsv = fopen('recently_reviewed_products.csv', 'w');
-        $oldProducts = [];
-        fgetcsv($productsCsv, 0, '|');
-        while ($data = fgetcsv($productsCsv, 0, '|')) {
-            $found = false;
-            foreach ($productData as $item) {
-                if ($data[0] == $item[0]) {
-                    $found = true;
-                    if ($data[7] !== $item[7]) { fwrite($reviewsCsv, $data[0] . "\r\n"); }
-                }
-            }
-            if (!$found) { fwrite($oldCsv, $data[0] . "\r\n"); }
-            $oldProducts[] = $data;
-        }
-        foreach ($productData as $newItem) {
-            $found = false;
-            foreach ($oldProducts as $oldItem) {
-                if ($newItem[0] == $oldItem[0]) $found = true;
-            }
-            if (!$found) { fwrite($newCsv, $newItem[0] . "\r\n"); }
-        }
-        fclose($productsCsv);
-        fclose($newCsv);
-        fclose($oldCsv);
-        fclose($reviewsCsv);
-    }
-    $file = fopen('products.csv', 'w');
-    fputcsv($file, ['Product Identifier', 'Product Name', 'Product Price', 'Product Images', 'Product Video', 'Product PDF', 'Product Features', 'Dates of Reviews'], "|");
-    foreach ($productData as $product) {
-        fputcsv($file, $product, '|');
-    }
-    fclose($file);
+function writeDB($ini, $productData) {
+	$server = $ini['db_serv'];
+	$user = $ini['db_user'];
+	$pass = $ini['db_pass'];
+	$db = $ini['db_name'];
+	
+	try {
+		$dbh = new PDO("mysql:host=$server;dbname=$db", $user, $pass);
+	} catch(PDOException $e) {
+		$dbh = new PDO("mysql:host=$server", $user, $pass);
+		$sql = "CREATE DATABASE $db";
+		$dbh->exec($sql);
+		$dbh = new PDO("mysql:host=$server;dbname=$db", $user, $pass);
+		$sql = "CREATE TABLE Products (
+				id INT(6) UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+				sku VARCHAR(30) NOT NULL,
+				name VARCHAR(250) NOT NULL,
+				price VARCHAR(30) NOT NULL,
+				images TEXT,
+				videos TEXT,
+				pdf TEXT,
+				features TEXT,
+				reviews TEXT,
+				state VARCHAR(1) NOT NULL)";
+		$dbh->exec($sql);
+	}
+	$dbh->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+	foreach ($productData as $item) {
+		$sql = $dbh->prepare("SELECT * FROM Products WHERE sku = :sku");
+		$sql->bindParam(':sku', $item[0]);
+		$sql->execute();
+		if ($sql->rowCount() > 0) {
+			$record = $sql->fetch(PDO::FETCH_ASSOC);
+			$upd = $dbh->prepare("UPDATE Products SET name=:name, price=:price, images=:images, videos=:videos, pdf=:pdf, features=:features, reviews=:reviews, state=:state 
+								  WHERE sku=:sku");
+			$state = $item[7] !== $record['reviews'] ? 'R' : 'A';
+		} else {
+			$upd = $dbh->prepare("INSERT INTO Products (sku, name, price, images, videos, pdf, features, reviews, state)
+								  VALUES (:sku, :name, :price, :images, :videos, :pdf, :features, :reviews, :state)");
+			$state = 'N';
+		}
+		$upd->bindParam(':sku', $item[0]);
+		$upd->bindParam(':name', $item[1]);
+		$upd->bindParam(':price', $item[2]);
+		$upd->bindParam(':images', $item[3]);
+		$upd->bindParam(':videos', $item[4]);
+		$upd->bindParam(':pdf', $item[5]);
+		$upd->bindParam(':features', $item[6]);
+		$upd->bindParam(':reviews', $item[7]);
+		$upd->bindParam(':state', $state);
+		$upd->execute();
+	}
+	$skuList = "'" . implode(', ', array_column($productData, 0)) . "'";
+	$skuList = str_replace(", ", "', '", $skuList);
+	$sql = $dbh->prepare("SELECT * FROM Products WHERE sku NOT IN (" . $skuList . ")");
+	$sql->execute();
+	if ($sql->rowCount() > 0) {
+		$result = $sql->fetchAll(PDO::FETCH_ASSOC);
+		$dbh->beginTransaction();
+		foreach ($result as $record) {
+			$upd = $dbh->prepare("UPDATE Products SET state=:state WHERE sku=:sku");
+			($record['state'] == 'A' || $record['state'] == 'R' || $record['state'] == 'N') ? $state = 'D' : $state = 'O';
+			$upd->bindParam(':sku', $record['sku']);
+			$upd->bindParam(':state', $state);
+			$upd->execute();
+		}
+		$dbh->commit();
+	}
+	$dbh = null;
 }
 
-function sendMail() {
+function writeCsv($ini) {
+	$server = $ini['db_serv'];
+	$user = $ini['db_user'];
+	$pass = $ini['db_pass'];
+	$db = $ini['db_name'];
+	
+	try {
+		$dbh = new PDO("mysql:host=$server;dbname=$db", $user, $pass);
+	} catch(PDOException $e) {
+		echo "Connection failed.\n" . $e->getMessage();
+		return;
+	}
+	$dbh->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+	
+	$firstRun = false;
+	if (!file_exists('products.csv')) { $firstRun = true; }
+	
+    $csv = fopen('products.csv', 'w');
+    fputcsv($csv, ['Product Identifier', 'Product Name', 'Product Price', 'Product Images', 'Product Video', 'Product PDF', 'Product Features', 'Dates of Reviews'], "|");
+	$sql = "SELECT * FROM Products WHERE state IN ('A', 'R', 'N')";
+	foreach ($dbh->query($sql) as $record) {
+		fputcsv($csv, [$record['sku'], $record['name'], $record['price'], $record['images'], 
+				$record['videos'], $record['pdf'], $record['features'], $record['reviews']], "|");
+	}
+	fclose($csv);
+	
+	if ($firstRun) { $dbh = null; return; }
+	
+	$csv = fopen("disappeared_products.csv", "w");
+	$sql = "SELECT * FROM Products WHERE state='D'";
+	foreach ($dbh->query($sql) as $record) {
+		fwrite($csv, $record['sku'] . "\r\n");
+	}
+	fclose($csv);
+
+	$csv = fopen("new_products.csv", "w");
+	$sql = "SELECT * FROM Products WHERE state='N'";
+	foreach ($dbh->query($sql) as $record) {
+		fwrite($csv, $record['sku'] . "\r\n");
+	}
+	fclose($csv);
+	
+	$csv = fopen("recently_reviewed_products.csv", "w");
+	$sql = "SELECT * FROM Products WHERE state='R'";
+	foreach ($dbh->query($sql) as $record) {
+		fwrite($csv, $record['sku'] . "\r\n");
+	}
+	fclose($csv);
+	$dbh = null;
+}
+
+function sendMail($ini) {
     $email = new PHPMailer();
 
-    if (!file_exists('testing.ini')) {
-        echo "ini file does not exist.\n";
-        return;
-    }
-
-    $ini = parse_ini_file('testing.ini');
     $email->setFrom('cjvoodoo@gmail.com', 'Denis Si', 0);
     $email->Subject = 'CARiD suspension systems | ' . date('Y-m-d H:i:s');
     $email->Body = 'What up';
@@ -272,11 +349,17 @@ function sendMail() {
     if ($email->send()) { echo "ok\n"; } else { echo "not ok\n" . $email->ErrorInfo; };
 }
 
+if (!file_exists('testing.ini')) {
+	echo "ini file does not exist.\n";
+	exit();
+}
+$ini = parse_ini_file('testing0.ini');
+
 $client = new Client();
 $parser = new Parser($client);
 
 echo "Getting product urls...";
-$parser->getUrls("https://www.carid.com/suspension-systems.html", 5);
+$parser->getUrls("https://www.carid.com/suspension-systems.html", 2);
 echo "done\n";
 
 echo "Getting product data...";
@@ -292,9 +375,13 @@ foreach ($parser->getProductData() as $item) {
     $productData[] = $product->getProductData();
 }
 
-echo "Writing product data...";
-writeCsv($productData);
+echo "Writing to database...";
+writeDB($ini, $productData);
+echo "done\n";
+
+echo "Writing files...";
+writeCsv($ini);
 echo "done\n";
 
 echo "Sending mail...";
-sendMail();
+sendMail($ini);

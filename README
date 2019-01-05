@@ -7,7 +7,12 @@ composer require phpmailer/phpmailer
 
 
 
-Что вписать в файл конфигурации testing.ini:
+Файл конфигурации testing.ini:
+
+db_serv = адрес сервера БД
+db_name = имя БД
+db_user = имя пользователя БД
+db_pass = пароль пользователя БД
 
 smtp_host = smtp хост для отправки почты
 mail_user = имя пользователя почты
