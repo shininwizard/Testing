@@ -251,7 +251,7 @@ function sendMail() {
     }
 
     $ini = parse_ini_file('testing.ini');
-    $email->setFrom('cjvoodoo@gmail.com', 'Denis Si', 0);
+    $email->setFrom('from@email.com', 'Your Name', 0);
     $email->Subject = 'CARiD suspension systems | ' . date('Y-m-d H:i:s');
     $email->Body = 'What up';
     $email->addAddress($ini['mail_dest']);
