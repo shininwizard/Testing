@@ -1,10 +1,7 @@
 Настройка:
 
-composer require guzzlehttp/guzzle
-composer require symfony/dom-crawler
-composer require symfony/css-selector
-composer require phpmailer/phpmailer
-
+composer install - установка зависимостей
+vendor\bin\doctrine orm:schema-tool:create - создание сущности Product в БД <db_name>
 
 
 Файл конфигурации testing.ini:
@@ -18,3 +15,5 @@ smtp_host = smtp хост для отправки почты
 mail_user = имя пользователя почты
 mail_pass = пароль пользователя почты
 mail_dest = адрес, на который надо отправлять результаты работы
+mail_from = адрес отправителя (подставляется в письмо в поле From)
+mail_name = имя отправителя (подставляется в письмо в поле From)

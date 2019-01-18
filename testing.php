@@ -1,63 +1,10 @@
 <?php
 
-require 'vendor\autoload.php';
+require_once 'bootstrap.php';
 
 use GuzzleHttp\Client;
 use Symfony\Component\DomCrawler\Crawler;
 use PHPMailer\PHPMailer\PHPMailer;
-
-class Product {
-    private $productId;
-    private $productName;
-    private $productPrice;
-    private $productImages;
-    private $productVideo;
-    private $productPdf;
-    private $productFeatures;
-    private $productReviewCount;
-    private $productReviewDates;
-
-    public function setProductData(array $data = []) {
-        $this->productId = $data['id'];
-        $this->productName = $data['title'];
-        $this->productPrice = $data['price'];
-        $matches = array();
-        preg_match('/(?<=CRD\.gallery = )(.*)(?=;)/', $data['media'], $matches);
-        $jsonMedia = $matches[0];
-        $jsonMedia = preg_replace('/(\'alt\'\: \'.+?\'\,)/', '', $jsonMedia);
-        $jsonMedia = str_replace(array("'", ",]"), array('"', ']'), $jsonMedia);
-        $media = json_decode($jsonMedia, true);
-        if (json_last_error() === JSON_ERROR_NONE) {
-            $this->productImages = "https://www.carid.com" . implode(', https://www.carid.com', array_column($media['images'], 'path'));
-            !empty(array_column($media['videos'], 'path')) ?
-                $this->productVideo = "https://www.carid.com" . implode(', https://www.carid.com', array_column($media['videos'], 'path')) : '';
-            $pdfOnly = [];
-            foreach (array_column($media['files'], 'path') as $file) {
-                if (strpos($file, '.pdf') > 0) $pdfOnly[] = $file;
-            }
-            !empty($pdfOnly) ? $this->productPdf = "https://www.carid.com" . implode(', https://www.carid.com', $pdfOnly) : '';
-        } else {
-            $this->productImages = 'Invalid json';
-        }
-        $this->productFeatures = implode('[:os:]', $data['features']);
-        foreach ($data['reviewDates'] as &$date) {
-            $date = date("m-d-Y", strtotime($date));
-        }
-        $this->productReviewCount = $data['reviewCount'];
-        $this->productReviewDates = implode(', ', $data['reviewDates']);
-    }
-
-    public function getProductData() {
-        return [$this->productId,
-                $this->productName,
-                $this->productPrice,
-                $this->productImages,
-                $this->productVideo,
-                $this->productPdf,
-                $this->productFeatures,
-                $this->productReviewDates];
-    }
-}
 
 class Parser {
     /**
@@ -75,6 +22,22 @@ class Parser {
         $this->client = $client;
     }
 
+    private function getNewIdentity($ip = '127.0.0.1', $port = '9051', $auth = '') {
+        $fp = fsockopen($ip, $port, $errno, $errstr, 10);
+        if (!$fp) {
+            echo "ERROR: $errno : $errstr";
+            return false;
+        } else {
+            fwrite($fp,"AUTHENTICATE \"".$auth."\"\n");
+            $response = fread($fp, 512);
+            fwrite($fp, "signal NEWNYM\n");
+            $response = fread($fp, 512);
+        }
+        fclose($fp);
+        sleep(5);
+        return true;
+    }
+
     public function getUrls($url, $pages = 1) {
         $pagination[] = $url;
 
@@ -83,12 +46,23 @@ class Parser {
         }
 
         foreach ($pagination as $page) {
-            $promise = $this->client->getAsync($page)->then(
-                function (\Psr\Http\Message\ResponseInterface $response) {
-                    $this->urls[] = $this->extractFromPage((string) $response->getBody());
-                });
-            $promise->wait();
+            sleep(2);
+            $this->requestPage($page);
         }
+    }
+
+    private function requestPage($page) {
+        $retry = false;
+        $promise = $this->client->getAsync($page, ['proxy' => 'socks5://localhost:9050'])->then(
+            function (\Psr\Http\Message\ResponseInterface $response) {
+                $this->urls[] = $this->extractFromPage((string) $response->getBody());
+            },
+            function (\GuzzleHttp\Exception\RequestException $e) use (&$retry) {
+                $this->getNewIdentity();
+                $retry = true;
+            });
+        $promise->wait();
+        if ($retry) { $this->requestPage($page); }
     }
 
     private function extractFromPage($page) {
@@ -102,12 +76,23 @@ class Parser {
 
     public function parse(array $urls = []) {
         foreach ($urls as $url) {
-            $promise = $this->client->getAsync($url)->then(
-                function (\Psr\Http\Message\ResponseInterface $response) use ($url) {
-                    $this->data[] = $this->extractFromHtml((string) $response->getBody(), $url);
-                });
-            $promise->wait();
+            sleep(2);
+            $this->requestUrl($url);
         }
+    }
+
+    private function requestUrl($url) {
+        $retry = false;
+        $promise = $this->client->getAsync($url, ['proxy' => 'socks5://localhost:9050'])->then(
+            function (\Psr\Http\Message\ResponseInterface $response) use ($url) {
+                $this->data[] = $this->extractFromHtml((string) $response->getBody(), $url);
+            },
+            function (\GuzzleHttp\Exception\RequestException $e) use (&$retry) {
+                $this->getNewIdentity();
+                $retry = true;
+            });
+        $promise->wait();
+        if ($retry) { $this->requestUrl($url); }
     }
 
     private function extractFromHtml($html, $url) {
@@ -116,9 +101,10 @@ class Parser {
         $id = trim($crawler->filter('[itemprop="sku"]')->text());
         $title = trim($crawler->filter('h1')->text());
         $price = trim($crawler->filter('.js-product-price-hide')->text());
-        $images = $crawler->filter('.prod-gallery-thumbs > a')->extract(['href']);
-        foreach ($images as &$image) { $image = "https://www.carid.com" . $image; }
-        $media = $crawler->filter('.wrap > script')->eq(1)->text();
+//        $images = $crawler->filter('.prod-gallery-thumbs > a')->extract(['href']);
+//        foreach ($images as &$image) { $image = "https://www.carid.com" . $image; }
+        $script = $crawler->filter('.wrap > script')->eq(1)->text();
+		$media = $this->extractFromJson($script);
         $features = $crawler->filter('.js-spoiler-block li')->extract(['_text']);
         if (empty($features)) {
             $crawler->filter('.ov_hidden > p')->each(function (Crawler $crawler) {
@@ -146,8 +132,9 @@ class Parser {
             'id' => $id,
             'title' => $title,
             'price' => $price,
-            'images' => $images,
-            'media' => $media,
+            'images' => $media['images'],
+            'videos' => $media['videos'],
+			'pdf' => $media['pdf'],
             'features' => $features,
             'reviewCount' => $reviewCount,
             'reviewDates' => $reviewDates
@@ -194,6 +181,35 @@ class Parser {
         return $moreReviews;
     }
 
+	private function extractFromJson($script) {
+		$matches = array();
+		preg_match('/(?<=CRD\.gallery = )(.*)(?=;)/', $script, $matches);
+		$jsonMedia = $matches[0];
+		$jsonMedia = preg_replace('/(\'alt\'\: \'.+?\'\,)/', '', $jsonMedia);
+		$jsonMedia = str_replace(array("'", ",]"), array('"', ']'), $jsonMedia);
+		$media = json_decode($jsonMedia, true);
+		if (json_last_error() === JSON_ERROR_NONE) {
+			$images = "https://www.carid.com" . implode(', https://www.carid.com', array_column($media['images'], 'path'));
+			$videos = !empty(array_column($media['videos'], 'path')) ?
+                "https://www.carid.com" . implode(', https://www.carid.com', array_column($media['videos'], 'path')) : '';
+			$pdfOnly = [];
+			foreach (array_column($media['files'], 'path') as $file) {
+				if (strpos($file, '.pdf') > 0) $pdfOnly[] = $file;
+			}
+			$pdf = !empty($pdfOnly) ? "https://www.carid.com" . implode(', https://www.carid.com', $pdfOnly) : '';
+		} else {
+			$images = 'Invalid json';
+			$videos = 'Invalid json';
+			$pdf = 'Invalid json';
+		}
+		
+		return [
+			'images' => $images,
+			'videos' => $videos,
+			'pdf' => $pdf
+		];
+	}
+	
     public function getProductUrls() {
         return $this->urls;
     }
@@ -203,132 +219,11 @@ class Parser {
     }
 }
 
-function writeDB($ini, $productData) {
-	$server = $ini['db_serv'];
-	$user = $ini['db_user'];
-	$pass = $ini['db_pass'];
-	$db = $ini['db_name'];
-	
-	try {
-		$dbh = new PDO("mysql:host=$server;dbname=$db", $user, $pass);
-	} catch(PDOException $e) {
-		$dbh = new PDO("mysql:host=$server", $user, $pass);
-		$sql = "CREATE DATABASE $db";
-		$dbh->exec($sql);
-		$dbh = new PDO("mysql:host=$server;dbname=$db", $user, $pass);
-		$sql = "CREATE TABLE Products (
-				id INT(6) UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-				sku VARCHAR(30) NOT NULL,
-				name VARCHAR(250) NOT NULL,
-				price VARCHAR(30) NOT NULL,
-				images TEXT,
-				videos TEXT,
-				pdf TEXT,
-				features TEXT,
-				reviews TEXT,
-				state VARCHAR(1) NOT NULL)";
-		$dbh->exec($sql);
-	}
-	$dbh->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-	foreach ($productData as $item) {
-		$sql = $dbh->prepare("SELECT * FROM Products WHERE sku = :sku");
-		$sql->bindParam(':sku', $item[0]);
-		$sql->execute();
-		if ($sql->rowCount() > 0) {
-			$record = $sql->fetch(PDO::FETCH_ASSOC);
-			$upd = $dbh->prepare("UPDATE Products SET name=:name, price=:price, images=:images, videos=:videos, pdf=:pdf, features=:features, reviews=:reviews, state=:state 
-								  WHERE sku=:sku");
-			$state = $item[7] !== $record['reviews'] ? 'R' : 'A';
-		} else {
-			$upd = $dbh->prepare("INSERT INTO Products (sku, name, price, images, videos, pdf, features, reviews, state)
-								  VALUES (:sku, :name, :price, :images, :videos, :pdf, :features, :reviews, :state)");
-			$state = 'N';
-		}
-		$upd->bindParam(':sku', $item[0]);
-		$upd->bindParam(':name', $item[1]);
-		$upd->bindParam(':price', $item[2]);
-		$upd->bindParam(':images', $item[3]);
-		$upd->bindParam(':videos', $item[4]);
-		$upd->bindParam(':pdf', $item[5]);
-		$upd->bindParam(':features', $item[6]);
-		$upd->bindParam(':reviews', $item[7]);
-		$upd->bindParam(':state', $state);
-		$upd->execute();
-	}
-	$skuList = "'" . implode(', ', array_column($productData, 0)) . "'";
-	$skuList = str_replace(", ", "', '", $skuList);
-	$sql = $dbh->prepare("SELECT * FROM Products WHERE sku NOT IN (" . $skuList . ")");
-	$sql->execute();
-	if ($sql->rowCount() > 0) {
-		$result = $sql->fetchAll(PDO::FETCH_ASSOC);
-		$dbh->beginTransaction();
-		foreach ($result as $record) {
-			$upd = $dbh->prepare("UPDATE Products SET state=:state WHERE sku=:sku");
-			($record['state'] == 'A' || $record['state'] == 'R' || $record['state'] == 'N') ? $state = 'D' : $state = 'O';
-			$upd->bindParam(':sku', $record['sku']);
-			$upd->bindParam(':state', $state);
-			$upd->execute();
-		}
-		$dbh->commit();
-	}
-	$dbh = null;
-}
-
-function writeCsv($ini) {
-	$server = $ini['db_serv'];
-	$user = $ini['db_user'];
-	$pass = $ini['db_pass'];
-	$db = $ini['db_name'];
-	
-	try {
-		$dbh = new PDO("mysql:host=$server;dbname=$db", $user, $pass);
-	} catch(PDOException $e) {
-		echo "Connection failed.\n" . $e->getMessage();
-		return;
-	}
-	$dbh->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-	
-	$firstRun = false;
-	if (!file_exists('products.csv')) { $firstRun = true; }
-	
-    $csv = fopen('products.csv', 'w');
-    fputcsv($csv, ['Product Identifier', 'Product Name', 'Product Price', 'Product Images', 'Product Video', 'Product PDF', 'Product Features', 'Dates of Reviews'], "|");
-	$sql = "SELECT * FROM Products WHERE state IN ('A', 'R', 'N')";
-	foreach ($dbh->query($sql) as $record) {
-		fputcsv($csv, [$record['sku'], $record['name'], $record['price'], $record['images'], 
-				$record['videos'], $record['pdf'], $record['features'], $record['reviews']], "|");
-	}
-	fclose($csv);
-	
-	if ($firstRun) { $dbh = null; return; }
-	
-	$csv = fopen("disappeared_products.csv", "w");
-	$sql = "SELECT * FROM Products WHERE state='D'";
-	foreach ($dbh->query($sql) as $record) {
-		fwrite($csv, $record['sku'] . "\r\n");
-	}
-	fclose($csv);
-
-	$csv = fopen("new_products.csv", "w");
-	$sql = "SELECT * FROM Products WHERE state='N'";
-	foreach ($dbh->query($sql) as $record) {
-		fwrite($csv, $record['sku'] . "\r\n");
-	}
-	fclose($csv);
-	
-	$csv = fopen("recently_reviewed_products.csv", "w");
-	$sql = "SELECT * FROM Products WHERE state='R'";
-	foreach ($dbh->query($sql) as $record) {
-		fwrite($csv, $record['sku'] . "\r\n");
-	}
-	fclose($csv);
-	$dbh = null;
-}
-
 function sendMail($ini) {
     $email = new PHPMailer();
 
-    $email->setFrom('cjvoodoo@gmail.com', 'Denis Si', 0);
+    $email->setFrom('from@email.com', 'Your Name', 0);
+    $email->setFrom($ini['mail_from'], $ini['mail_name'], 0);
     $email->Subject = 'CARiD suspension systems | ' . date('Y-m-d H:i:s');
     $email->Body = 'What up';
     $email->addAddress($ini['mail_dest']);
@@ -349,12 +244,6 @@ function sendMail($ini) {
     if ($email->send()) { echo "ok\n"; } else { echo "not ok\n" . $email->ErrorInfo; };
 }
 
-if (!file_exists('testing.ini')) {
-	echo "ini file does not exist.\n";
-	exit();
-}
-$ini = parse_ini_file('testing.ini');
-
 $client = new Client();
 $parser = new Parser($client);
 
@@ -368,19 +257,50 @@ foreach ($parser->getProductUrls() as $urls) {
 }
 echo "done\n";
 
-$productData = [];
-foreach ($parser->getProductData() as $item) {
-    $product = new Product();
-    $product->setProductData($item);
-    $productData[] = $product->getProductData();
-}
-
 echo "Writing to database...";
-writeDB($ini, $productData);
+foreach ($parser->getProductData() as $item) {
+	$product = $entityManager->getRepository('Product')->findOneBy(['sku' => $item['id']]);
+    foreach ($item['reviewDates'] as &$date) {
+        $date = date("m-d-Y", strtotime($date));
+    }
+    $reviews = implode(', ', $item['reviewDates']);
+	if ($product === null) {
+		$product = new Product();
+		$product->setState('N');
+	} else {
+		if (in_array($product->getState(), ['N', 'A', 'R'], true) && $product->getReviews() !== $reviews) { $product->setState('R'); }
+		if (in_array($product->getState(), ['N', 'A', 'R'], true) && $product->getReviews() === $reviews) { $product->setState('A'); }
+		if (in_array($product->getState(), ['O', 'D'], true)) { $product->setState('N'); }
+	}
+	$product->setSku($item['id']);
+	$product->setName($item['title']);
+	$product->setPrice($item['price']);
+	$product->setImages($item['images']);
+	$product->setVideos($item['videos']);
+	$product->setPdf($item['pdf']);
+	$product->setFeatures(implode('[:os:]', $item['features']));
+    $product->setReviews($reviews);
+	$entityManager->persist($product);
+}
+$entityManager->flush();
+
+$skuList = array_column($parser->getProductData(), 'id');
+$query = $entityManager->createQuery("SELECT p FROM Product p WHERE p.sku NOT IN(:sku)");
+$query->setParameter('sku', $skuList);
+$deadProducts = $query->getResult();
+foreach ($deadProducts as $product) {
+	if (in_array($product->getState(), ['N', 'A', 'R'], true)) { 
+		$product->setState('D');
+	} else { 
+		$product->setState('O');
+	}
+	$entityManager->persist($product);
+}
+$entityManager->flush();
 echo "done\n";
 
 echo "Writing files...";
-writeCsv($ini);
+$entityManager->getRepository('Product')->writeCsv();
 echo "done\n";
 
 echo "Sending mail...";
